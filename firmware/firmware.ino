@@ -1,205 +1,469 @@
-#include <ESP8266WiFi.h>
-#include <PubSubClient.h>
-#include <EEPROM.h>
+#include <Arduino.h>
 #include <ArduinoJson.h>
+#include <ESP8266HTTPClient.h>
+#include <ESP8266WebServer.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266httpUpdate.h>
+#include <ESP8266mDNS.h>
+#include <PubSubClient.h>
+#include <time.h>
 
-// WiFi Configuration
-const char* ssid = "oppo iphone 9";
-const char* password = "projectpi";
+#include "core/ConfigStore.h"
+#include "core/TopicHelper.h"
+#include "drivers/RelayBoard.h"
+#include "modules/IrController.h"
+#include "modules/ProvisioningServer.h"
 
-// MQTT Configuration
-const char* mqtt_server = "192.168.1.22"; // Change to Pi's IP
-const int mqtt_port = 1883;
+namespace {
 
-// Pin Mapping
-const int relayPins[] = {D1, D2, D5, D6};
-const int switchPin = D7; // GPIO13 (Button 1)
-const int switchPin2 = D3; // Button 2
-const int led1Pin = D0;
-const int led2Pin = D4;
-const int numAppliances = 4;
+using zapp::CHANNEL_COUNT;
+using zapp::ConfigStore;
+using zapp::DeviceConfig;
+using zapp::IrController;
+using zapp::ProvisioningServer;
+using zapp::RelayBoard;
 
-// State Variables
-bool relayState[4];
-bool lastSwitchLevel;
-bool lastSwitchLevel2;
-unsigned long lastDebounceTime = 0;
-const unsigned long debounceDelay = 50;
-unsigned long lastHeartbeat = 0;
+constexpr char kFirmwareVersion[] = "1.0.0";
+constexpr uint16_t kMqttPort = 1883;
+constexpr uint32_t kHeartbeatIntervalMs = 10000;
+constexpr uint32_t kWifiRetryIntervalMs = 10000;
+constexpr uint32_t kMqttRetryIntervalMs = 5000;
+constexpr uint8_t kWifiFailureThreshold = 6;
 
-WiFiClient espClient;
-PubSubClient client(espClient);
+enum class DeviceState {
+  BOOT,
+  PROVISIONING,
+  CONNECTING_WIFI,
+  CONNECTING_MQTT,
+  ACTIVE,
+  ERROR,
+};
+
+ConfigStore gConfigStore;
+DeviceConfig gConfig;
+RelayBoard gRelayBoard;
+ProvisioningServer gProvisioningServer;
+IrController gIrController;
+WiFiClient gWifiClient;
+PubSubClient gMqttClient(gWifiClient);
+
+DeviceState gState = DeviceState::BOOT;
+bool gShouldReboot = false;
+bool gWifiWasConnected = false;
+bool gMdnsStarted = false;
+uint8_t gWifiFailures = 0;
+uint32_t gLastWifiAttemptMs = 0;
+uint32_t gLastMqttAttemptMs = 0;
+uint32_t gLastHeartbeatMs = 0;
+String gPendingOtaUrl;
+bool gHasEpochBase = false;
+int32_t gEpochOffsetSeconds = 0;
+
+String hostName() {
+  return "zapp-" + String(ESP.getChipId(), HEX);
+}
+
+uint32_t currentEpochSeconds() {
+  const time_t current = time(nullptr);
+  if (current > 1700000000) {
+    return static_cast<uint32_t>(current);
+  }
+
+  if (gHasEpochBase) {
+    return static_cast<uint32_t>((millis() / 1000UL) + gEpochOffsetSeconds);
+  }
+
+  return millis() / 1000UL;
+}
+
+void updateEpochBase(const JsonDocument& doc) {
+  if (!doc["timestamp"].is<uint32_t>()) {
+    return;
+  }
+
+  const uint32_t timestamp = doc["timestamp"].as<uint32_t>();
+  gEpochOffsetSeconds = static_cast<int32_t>(timestamp) -
+                        static_cast<int32_t>(millis() / 1000UL);
+  gHasEpochBase = true;
+}
+
+String onOff(bool state) {
+  return state ? "ON" : "OFF";
+}
+
+void persistRelayStates() {
+  for (uint8_t channel = 0; channel < CHANNEL_COUNT; ++channel) {
+    gConfig.relayStates[channel] = gRelayBoard.getState(channel) ? 1 : 0;
+  }
+  gConfigStore.save(gConfig);
+}
+
+void publishState(uint8_t channel);
+
+void publishMetadata(uint8_t channel) {
+  DynamicJsonDocument doc(256);
+  doc["deviceId"] = zapp::logicalDeviceId(gConfig, channel);
+  doc["roomId"] = gConfig.roomId;
+  doc["type"] = "light";
+  JsonArray capabilities = doc.createNestedArray("capabilities");
+  capabilities.add("on");
+  capabilities.add("off");
+  doc["firmwareVersion"] = kFirmwareVersion;
+
+  String payload;
+  serializeJson(doc, payload);
+  gMqttClient.publish(zapp::metaTopic(gConfig, channel).c_str(), payload.c_str(), true);
+}
+
+void publishHeartbeat(uint8_t channel) {
+  DynamicJsonDocument doc(192);
+  doc["deviceId"] = zapp::logicalDeviceId(gConfig, channel);
+  doc["status"] = "ONLINE";
+  doc["timestamp"] = currentEpochSeconds();
+
+  String payload;
+  serializeJson(doc, payload);
+  gMqttClient.publish(zapp::heartbeatTopic(gConfig, channel).c_str(), payload.c_str(),
+                      false);
+}
+
+void publishState(uint8_t channel) {
+  DynamicJsonDocument doc(192);
+  doc["deviceId"] = zapp::logicalDeviceId(gConfig, channel);
+  doc["roomId"] = gConfig.roomId;
+  doc["state"] = onOff(gRelayBoard.getState(channel));
+  doc["timestamp"] = currentEpochSeconds();
+
+  String payload;
+  serializeJson(doc, payload);
+  gMqttClient.publish(zapp::stateTopic(gConfig, channel).c_str(), payload.c_str(), true);
+}
+
+void publishAllMetadata() {
+  for (uint8_t channel = 0; channel < CHANNEL_COUNT; ++channel) {
+    publishMetadata(channel);
+  }
+}
+
+void publishAllStates() {
+  for (uint8_t channel = 0; channel < CHANNEL_COUNT; ++channel) {
+    publishState(channel);
+  }
+}
+
+void publishAllHeartbeats() {
+  for (uint8_t channel = 0; channel < CHANNEL_COUNT; ++channel) {
+    publishHeartbeat(channel);
+  }
+}
+
+void applyChannelState(uint8_t channel, bool state, bool publishUpdate) {
+  gRelayBoard.setState(channel, state);
+  persistRelayStates();
+
+  if (publishUpdate && gMqttClient.connected()) {
+    publishState(channel);
+  }
+}
+
+void toggleChannel(uint8_t channel, bool publishUpdate) {
+  applyChannelState(channel, !gRelayBoard.getState(channel), publishUpdate);
+}
+
+bool parseRequestedState(const JsonDocument& doc, bool& requestedState) {
+  if (doc["state"].is<const char*>()) {
+    const String state = String(doc["state"].as<const char*>());
+    if (state.equalsIgnoreCase("ON")) {
+      requestedState = true;
+      return true;
+    }
+    if (state.equalsIgnoreCase("OFF")) {
+      requestedState = false;
+      return true;
+    }
+  }
+
+  if (doc["state"].is<int>()) {
+    requestedState = doc["state"].as<int>() != 0;
+    return true;
+  }
+
+  return false;
+}
+
+void queueOtaIfPresent(const JsonDocument& doc) {
+  if (doc["otaUrl"].is<const char*>()) {
+    gPendingOtaUrl = String(doc["otaUrl"].as<const char*>());
+  }
+}
+
+void handleNodeCommand(const JsonDocument& doc) {
+  queueOtaIfPresent(doc);
+
+  if (doc["irCommand"].is<const char*>()) {
+    gIrController.sendCommand(String(doc["irCommand"].as<const char*>()));
+  }
+
+  if (doc["channel"].is<uint8_t>()) {
+    const uint8_t oneBasedChannel = doc["channel"].as<uint8_t>();
+    if (oneBasedChannel >= 1 && oneBasedChannel <= CHANNEL_COUNT) {
+      bool requestedState = false;
+      if (parseRequestedState(doc, requestedState)) {
+        applyChannelState(oneBasedChannel - 1, requestedState, true);
+      }
+    }
+  }
+
+  if (doc["states"].is<JsonArrayConst>()) {
+    const JsonArrayConst states = doc["states"].as<JsonArrayConst>();
+    uint8_t channel = 0;
+    for (JsonVariantConst item : states) {
+      if (channel >= CHANNEL_COUNT) {
+        break;
+      }
+
+      const bool state = item.is<const char*>()
+                             ? String(item.as<const char*>()).equalsIgnoreCase("ON")
+                             : item.as<int>() != 0;
+      applyChannelState(channel, state, true);
+      ++channel;
+    }
+  }
+}
+
+bool resolveHubAddress(IPAddress& hubAddress) {
+  if (WiFi.hostByName("hub.local", hubAddress) == 1) {
+    return true;
+  }
+
+  return hubAddress.fromString(gConfig.hubIp);
+}
+
+void subscribeTopics() {
+  gMqttClient.subscribe(zapp::nodeCommandTopic(gConfig).c_str());
+
+  for (uint8_t channel = 0; channel < CHANNEL_COUNT; ++channel) {
+    gMqttClient.subscribe(zapp::setTopic(gConfig, channel).c_str());
+    gMqttClient.subscribe(zapp::legacySetTopic(channel).c_str());
+  }
+}
+
+void handleMqttMessage(char* topic, byte* payload, unsigned int length) {
+  DynamicJsonDocument doc(512);
+  const auto error = deserializeJson(doc, payload, length);
+  if (error) {
+    return;
+  }
+
+  updateEpochBase(doc);
+  const String incomingTopic(topic);
+
+  if (incomingTopic == zapp::nodeCommandTopic(gConfig)) {
+    handleNodeCommand(doc);
+    return;
+  }
+
+  for (uint8_t channel = 0; channel < CHANNEL_COUNT; ++channel) {
+    if (incomingTopic != zapp::setTopic(gConfig, channel) &&
+        incomingTopic != zapp::legacySetTopic(channel)) {
+      continue;
+    }
+
+    queueOtaIfPresent(doc);
+    if (doc["irCommand"].is<const char*>()) {
+      gIrController.sendCommand(String(doc["irCommand"].as<const char*>()));
+    }
+
+    bool requestedState = false;
+    if (parseRequestedState(doc, requestedState)) {
+      applyChannelState(channel, requestedState, true);
+    }
+    return;
+  }
+}
+
+void onProvisioningSaved(const DeviceConfig& config) {
+  gConfig = config;
+  gConfig.magic = zapp::CONFIG_MAGIC;
+  gConfig.version = zapp::CONFIG_VERSION;
+  gConfigStore.save(gConfig);
+  gShouldReboot = true;
+}
+
+void startProvisioningMode() {
+  if (gProvisioningServer.isActive()) {
+    return;
+  }
+
+  gState = DeviceState::PROVISIONING;
+  gMqttClient.disconnect();
+  WiFi.disconnect(true);
+  delay(50);
+
+  String apName = "Device-" + String(ESP.getChipId(), HEX);
+  apName.toUpperCase();
+  gProvisioningServer.begin(apName, gConfig, onProvisioningSaved);
+}
+
+void onWifiConnected() {
+  gWifiFailures = 0;
+  gState = DeviceState::CONNECTING_MQTT;
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+
+  if (!gMdnsStarted) {
+    const String mdnsHostName = hostName();
+    gMdnsStarted = MDNS.begin(mdnsHostName.c_str());
+  }
+}
+
+void handleWifi() {
+  if (gProvisioningServer.isActive()) {
+    return;
+  }
+
+  if (!zapp::isProvisioned(gConfig)) {
+    startProvisioningMode();
+    return;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!gWifiWasConnected) {
+      gWifiWasConnected = true;
+      onWifiConnected();
+    }
+    return;
+  }
+
+  if (gWifiWasConnected) {
+    gWifiWasConnected = false;
+    gMdnsStarted = false;
+    gMqttClient.disconnect();
+  }
+
+  if (millis() - gLastWifiAttemptMs < kWifiRetryIntervalMs) {
+    return;
+  }
+
+  gLastWifiAttemptMs = millis();
+  ++gWifiFailures;
+
+  if (gWifiFailures >= kWifiFailureThreshold) {
+    startProvisioningMode();
+    return;
+  }
+
+  gState = DeviceState::CONNECTING_WIFI;
+  WiFi.mode(WIFI_STA);
+  const String wifiHostName = hostName();
+  WiFi.hostname(wifiHostName.c_str());
+  WiFi.begin(gConfig.wifiSsid, gConfig.wifiPassword);
+}
+
+void handleMqtt() {
+  if (gProvisioningServer.isActive() || WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+
+  if (gMqttClient.connected()) {
+    gMqttClient.loop();
+    return;
+  }
+
+  if (millis() - gLastMqttAttemptMs < kMqttRetryIntervalMs) {
+    return;
+  }
+
+  gLastMqttAttemptMs = millis();
+  gState = DeviceState::CONNECTING_MQTT;
+
+  IPAddress hubAddress;
+  if (resolveHubAddress(hubAddress)) {
+    gMqttClient.setServer(hubAddress, kMqttPort);
+  } else {
+    gMqttClient.setServer("hub.local", kMqttPort);
+  }
+
+  const String clientId = hostName() + "-" + String(ESP.getChipId(), HEX);
+  if (!gMqttClient.connect(clientId.c_str())) {
+    return;
+  }
+
+  subscribeTopics();
+  publishAllMetadata();
+  publishAllStates();
+  publishAllHeartbeats();
+  gLastHeartbeatMs = millis();
+  gState = DeviceState::ACTIVE;
+}
+
+void handleButtons() {
+  uint8_t channel = 0;
+  while (gRelayBoard.consumeButtonPress(channel)) {
+    toggleChannel(channel, gMqttClient.connected());
+  }
+}
+
+void handleHeartbeat() {
+  if (!gMqttClient.connected()) {
+    return;
+  }
+
+  if (millis() - gLastHeartbeatMs < kHeartbeatIntervalMs) {
+    return;
+  }
+
+  gLastHeartbeatMs = millis();
+  publishAllHeartbeats();
+}
+
+void handleOta() {
+  if (gPendingOtaUrl.isEmpty() || WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+
+  ESPhttpUpdate.rebootOnUpdate(true);
+  t_httpUpdate_return result = ESPhttpUpdate.update(gWifiClient, gPendingOtaUrl);
+  if (result == HTTP_UPDATE_FAILED) {
+    Serial.printf("OTA failed: %s\n", ESPhttpUpdate.getLastErrorString().c_str());
+    gPendingOtaUrl = "";
+  }
+}
+
+}  // namespace
 
 void setup() {
   Serial.begin(115200);
-  EEPROM.begin(4);
+  delay(50);
 
-  // Initialize Pins
-  for (int i = 0; i < numAppliances; i++) {
-    pinMode(relayPins[i], OUTPUT);
-    
-    // Load state from EEPROM
-    relayState[i] = (EEPROM.read(i) == 1);
-  }
+  gConfigStore.begin();
+  gConfigStore.load(gConfig);
 
-  // Switch Setup
-  pinMode(switchPin, INPUT_PULLUP);
-  pinMode(switchPin2, INPUT_PULLUP);
-  pinMode(led1Pin, OUTPUT);
-  pinMode(led2Pin, OUTPUT);
+  gRelayBoard.begin(gConfig.relayStates);
+  gIrController.begin();
 
-  lastSwitchLevel = digitalRead(switchPin);
-  lastSwitchLevel2 = digitalRead(switchPin2);
-  
-  // Apply Initial States
-  for (int i = 0; i < numAppliances; i++) {
-    applyRelayGPIO(i);
-    // Explicitly sync LEDs for Relay 0 and 1
-    if (i == 0) digitalWrite(led1Pin, relayState[0] ? HIGH : LOW);
-    if (i == 1) digitalWrite(led2Pin, relayState[1] ? HIGH : LOW);
-  }
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(false);
 
-  setup_wifi();
-  client.setServer(mqtt_server, mqtt_port);
-  client.setCallback(callback);
-}
+  gMqttClient.setCallback(handleMqttMessage);
+  gMqttClient.setBufferSize(512);
 
-void setup_wifi() {
-  delay(10);
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("\nWiFi connected");
-}
-
-// Unified State Handler (MANDATORY)
-void handleStateChange(uint8_t id, bool newState) {
-  if (id >= numAppliances) return;
-  if (relayState[id] == newState) return;
-
-  relayState[id] = newState;
-  applyRelayGPIO(id);
-  
-  // LED Status Feedback
-  if (id == 0) digitalWrite(led1Pin, relayState[0] ? HIGH : LOW);
-  if (id == 1) digitalWrite(led2Pin, relayState[1] ? HIGH : LOW);
-
-  EEPROM.write(id, relayState[id] ? 1 : 0);
-  EEPROM.commit();
-  
-  publishStatus(id);
-}
-
-void applyRelayGPIO(uint8_t id) {
-  // ACTIVE LOW logic: true (ON) means LOW, false (OFF) means HIGH
-  digitalWrite(relayPins[id], relayState[id] ? LOW : HIGH);
-}
-
-void callback(char* topic, byte* payload, unsigned int length) {
-  StaticJsonDocument<200> doc;
-  DeserializationError error = deserializeJson(doc, payload, length);
-  if (error) return;
-  
-  int state = doc["state"];
-  
-  String topicStr = String(topic);
-  // home/appliance/1/set -> Extract '1'
-  int applianceId = topicStr.substring(15, topicStr.indexOf('/', 15)).toInt();
-  
-  if (applianceId >= 1 && applianceId <= numAppliances) {
-    handleStateChange(applianceId - 1, state == 1);
-  }
-}
-
-void publishStatus(uint8_t index) {
-  char topic[50];
-  sprintf(topic, "home/appliance/%d/status", index + 1);
-  
-  StaticJsonDocument<100> doc;
-  doc["state"] = relayState[index] ? 1 : 0;
-  doc["updated_at"] = 0; 
-  
-  char buffer[100];
-  serializeJson(doc, buffer);
-  client.publish(topic, buffer);
-}
-
-void publishNodeStatus() {
-  StaticJsonDocument<50> doc;
-  doc["online"] = true;
-  char buffer[50];
-  serializeJson(doc, buffer);
-  client.publish("home/node/status", buffer);
-}
-
-void reconnect() {
-  while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    if (client.connect("ESP8266Client")) {
-      Serial.println("connected");
-      client.subscribe("home/appliance/+/set");
-      // Publish initial state for all
-      for (int i = 0; i < numAppliances; i++) publishStatus(i);
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 2 seconds");
-      
-      // Edge detection polling during reconnect (Non-blocking)
-      unsigned long start = millis();
-      while(millis() - start < 2000) {
-        checkSwitchEdge();
-        yield();
-      }
-    }
-  }
-}
-
-void checkSwitchEdge() {
-  unsigned long currentTime = millis();
-  
-  // Button 1 logic
-  bool currentLevel = digitalRead(switchPin);
-  if (currentLevel != lastSwitchLevel) {
-    if (currentTime - lastDebounceTime > debounceDelay) {
-      lastDebounceTime = currentTime;
-      lastSwitchLevel = currentLevel;
-
-      if (currentLevel == LOW) { // Pressed
-        handleStateChange(0, !relayState[0]);
-      }
-    }
-  }
-
-  // Button 2 logic
-  bool currentLevel2 = digitalRead(switchPin2);
-  if (currentLevel2 != lastSwitchLevel2) {
-    if (currentTime - lastDebounceTime > debounceDelay) {
-      lastDebounceTime = currentTime;
-      lastSwitchLevel2 = currentLevel2;
-
-      if (currentLevel2 == LOW) { // Pressed
-        handleStateChange(1, !relayState[1]);
-      }
-    }
+  if (!zapp::isProvisioned(gConfig)) {
+    startProvisioningMode();
   }
 }
 
 void loop() {
-  if (!client.connected()) {
-    reconnect();
-  }
-  client.loop();
+  gProvisioningServer.loop();
+  handleButtons();
+  handleWifi();
+  handleMqtt();
+  handleHeartbeat();
+  handleOta();
 
-  checkSwitchEdge();
-
-  // Heartbeat every 5 seconds
-  if (millis() - lastHeartbeat > 5000) {
-    publishNodeStatus();
-    lastHeartbeat = millis();
+  if (gShouldReboot) {
+    delay(200);
+    ESP.restart();
   }
+
+  delay(5);
 }
