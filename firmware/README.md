@@ -46,6 +46,17 @@ This firmware implements the Zapp local-first switch node described in [README.m
 - PubSubClient is used for compatibility with the repo docs; if strict MQTT QoS 1 publish semantics are required, the MQTT client layer should be upgraded.
 
 ## Build / Flash
+With `arduino-cli`:
+
+```bash
+cd firmware
+arduino-cli lib install ArduinoJson PubSubClient
+arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 firmware
+arduino-cli board list
+arduino-cli upload -p /dev/ttyUSB0 --fqbn esp8266:esp8266:nodemcuv2 firmware
+arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=115200
+```
+
 With PlatformIO:
 
 ```bash
