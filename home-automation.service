@@ -1,0 +1,14 @@
+[Unit]
+Description=Local Home Automation Service
+After=network.target mosquitto.service
+
+[Service]
+ExecStart=/usr/bin/node /home/pi/home_pie/home-automation/server/dist/app.js
+WorkingDirectory=/home/pi/home_pie/home-automation/server
+StandardOutput=inherit
+StandardError=inherit
+Restart=always
+User=pi
+
+[Install]
+WantedBy=multi-user.target
