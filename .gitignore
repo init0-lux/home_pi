@@ -56,3 +56,5 @@ Cargo.lock
 optional/**/node_modules/
 optional/**/dist/
 optional/**/*.db
+
+worktrees/
