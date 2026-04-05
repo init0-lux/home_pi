@@ -1,0 +1,10 @@
+services:
+  zapp-pwa:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    environment:
+      HOSTNAME: 0.0.0.0
+      PORT: 3000
+    ports:
+      - "3000:3000"
