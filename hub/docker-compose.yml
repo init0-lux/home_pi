@@ -1,0 +1,186 @@
+# =============================================================================
+# Zapp Hub - Docker Compose
+# Orchestrates: hub (Node.js backend) + mosquitto (MQTT broker)
+# =============================================================================
+
+name: zapp-hub
+
+# -----------------------------------------------------------------------------
+# Networks
+# -----------------------------------------------------------------------------
+networks:
+  zapp-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+# -----------------------------------------------------------------------------
+# Volumes
+# -----------------------------------------------------------------------------
+volumes:
+  # SQLite database persistence
+  hub-data:
+    driver: local
+
+  # Mosquitto retained messages & session persistence
+  mosquitto-data:
+    driver: local
+
+  # Mosquitto log files
+  mosquitto-logs:
+    driver: local
+
+  # OTA firmware binaries
+  hub-firmware:
+    driver: local
+
+# -----------------------------------------------------------------------------
+# Services
+# -----------------------------------------------------------------------------
+services:
+  # ── Mosquitto MQTT Broker ──────────────────────────────────────────────────
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: zapp-mosquitto
+    restart: unless-stopped
+
+    networks:
+      zapp-net:
+        ipv4_address: 172.20.0.10
+
+    ports:
+      # MQTT (expose to host so ESP devices on LAN can reach the broker)
+      - "1883:1883"
+      # WebSocket MQTT (for future browser-based clients)
+      # - "9001:9001"
+
+    volumes:
+      # Broker configuration
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      # Persistent retained messages and sessions
+      - mosquitto-data:/mosquitto/data
+      # Log files
+      - mosquitto-logs:/mosquitto/log
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mosquitto_pub -h localhost -p 1883 -t '$$SYS/#' -m '' -q 0 2>/dev/null || mosquitto_sub -h localhost -p 1883 -t '$$SYS/#' -C 1 --quiet 2>/dev/null && echo ok || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Zapp Hub (Node.js backend) ─────────────────────────────────────────────
+  hub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+
+    image: zapp-hub:latest
+    container_name: zapp-hub
+    restart: unless-stopped
+
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+
+    networks:
+      zapp-net:
+        ipv4_address: 172.20.0.11
+
+    ports:
+      # HTTP API & dashboard
+      - "3000:3000"
+
+    volumes:
+      # SQLite database (persisted across container restarts)
+      - hub-data:/app/data
+      # OTA firmware binaries
+      - hub-firmware:/app/firmware
+
+    environment:
+      # ── Server ───────────────────────────────────────────────────────────────
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3000
+      HOST: 0.0.0.0
+
+      # ── MQTT (points at the mosquitto service on the shared network) ─────────
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      MQTT_CLIENT_ID: ${MQTT_CLIENT_ID:-zapp-hub}
+      MQTT_USERNAME: ${MQTT_USERNAME:-}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
+      MQTT_QOS: ${MQTT_QOS:-1}
+
+      # ── Database ──────────────────────────────────────────────────────────────
+      DB_PATH: /app/data/zapp.db
+
+      # ── Auth ──────────────────────────────────────────────────────────────────
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      JWT_SECRET: ${JWT_SECRET:-change-this-in-production}
+      JWT_EXPIRY: ${JWT_EXPIRY:-7d}
+
+      # ── Health Monitoring ─────────────────────────────────────────────────────
+      DEVICE_OFFLINE_THRESHOLD_SECONDS: ${DEVICE_OFFLINE_THRESHOLD_SECONDS:-30}
+      DEVICE_HEARTBEAT_INTERVAL_SECONDS: ${DEVICE_HEARTBEAT_INTERVAL_SECONDS:-10}
+
+      # ── OTA ───────────────────────────────────────────────────────────────────
+      OTA_FIRMWARE_DIR: /app/firmware
+
+      # ── Logging ───────────────────────────────────────────────────────────────
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+
+      # ── MCP ───────────────────────────────────────────────────────────────────
+      MCP_ENABLED: ${MCP_ENABLED:-true}
+      MCP_API_KEY: ${MCP_API_KEY:-change-this-mcp-key}
+
+      # ── CORS ──────────────────────────────────────────────────────────────────
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3001}
+
+      # ── Property / Hub Identity ───────────────────────────────────────────────
+      PROPERTY_ID: ${PROPERTY_ID:-default-property}
+      HUB_NAME: ${HUB_NAME:-Zapp Hub}
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+# -----------------------------------------------------------------------------
+# Development override notes:
+#
+# For local development with hot-reload, create docker-compose.override.yml:
+#
+#   services:
+#     hub:
+#       build:
+#         target: builder   # use builder stage which has tsx installed
+#       command: ["npx", "tsx", "watch", "src/index.ts"]
+#       volumes:
+#         - ./src:/app/src:ro
+#       environment:
+#         NODE_ENV: development
+#         LOG_LEVEL: debug
+#
+# Run:  docker compose up
+# Logs: docker compose logs -f hub
+# -----------------------------------------------------------------------------
