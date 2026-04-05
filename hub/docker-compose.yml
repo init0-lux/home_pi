@@ -1,0 +1,189 @@
+# =============================================================================
+# Zapp Hub — Docker Compose
+# Services: hub (Node.js/TypeScript backend) + mosquitto (MQTT broker)
+# Package manager: pnpm
+# =============================================================================
+
+name: zapp-hub
+
+# -----------------------------------------------------------------------------
+# Networks
+# -----------------------------------------------------------------------------
+networks:
+  zapp-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+# -----------------------------------------------------------------------------
+# Volumes
+# -----------------------------------------------------------------------------
+volumes:
+  # SQLite database — persisted across container restarts and rebuilds
+  hub-data:
+    driver: local
+
+  # OTA firmware binaries served to ESP devices
+  hub-firmware:
+    driver: local
+
+  # Mosquitto retained messages and persistent session data
+  mosquitto-data:
+    driver: local
+
+  # Mosquitto log files
+  mosquitto-logs:
+    driver: local
+
+# -----------------------------------------------------------------------------
+# Services
+# -----------------------------------------------------------------------------
+services:
+
+  # ── Mosquitto MQTT Broker ───────────────────────────────────────────────────
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: zapp-mosquitto
+    restart: unless-stopped
+
+    networks:
+      zapp-net:
+        ipv4_address: 172.20.0.10
+
+    ports:
+      # Expose MQTT to the host LAN so ESP8266 devices can connect directly
+      - "1883:1883"
+
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-logs:/mosquitto/log
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mosquitto_pub -h 127.0.0.1 -p 1883 -t '$$SYS/health' -m '' -q 0 2>/dev/null && echo ok || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Zapp Hub (Node.js backend) ──────────────────────────────────────────────
+  hub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Use the final production stage (multi-stage build)
+      target: runner
+
+    image: zapp-hub:latest
+    container_name: zapp-hub
+    restart: unless-stopped
+
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+
+    networks:
+      zapp-net:
+        ipv4_address: 172.20.0.11
+
+    ports:
+      # HTTP API — accessible from the host and the local dashboard
+      - "3000:3000"
+
+    volumes:
+      # Persist the SQLite database across container lifecycle
+      - hub-data:/app/data
+      # Mount firmware directory for OTA distribution
+      - hub-firmware:/app/firmware
+
+    environment:
+      # ── Server ───────────────────────────────────────────────────────────────
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3000
+      HOST: 0.0.0.0
+
+      # ── MQTT ─────────────────────────────────────────────────────────────────
+      # Points at the mosquitto service on the shared bridge network.
+      # ESP devices on the host LAN connect via the exposed 1883 port on the host.
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      MQTT_CLIENT_ID: ${MQTT_CLIENT_ID:-zapp-hub}
+      MQTT_USERNAME: ${MQTT_USERNAME:-}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
+      MQTT_QOS: ${MQTT_QOS:-1}
+
+      # ── Database ──────────────────────────────────────────────────────────────
+      DB_PATH: /app/data/zapp.db
+
+      # ── Authentication ────────────────────────────────────────────────────────
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      # IMPORTANT: Change JWT_SECRET before deploying to production!
+      JWT_SECRET: ${JWT_SECRET:-change-this-in-production}
+      JWT_EXPIRY: ${JWT_EXPIRY:-7d}
+
+      # ── Health Monitoring ─────────────────────────────────────────────────────
+      DEVICE_OFFLINE_THRESHOLD_SECONDS: ${DEVICE_OFFLINE_THRESHOLD_SECONDS:-30}
+      DEVICE_HEARTBEAT_INTERVAL_SECONDS: ${DEVICE_HEARTBEAT_INTERVAL_SECONDS:-10}
+
+      # ── OTA ───────────────────────────────────────────────────────────────────
+      OTA_FIRMWARE_DIR: /app/firmware
+
+      # ── Logging ───────────────────────────────────────────────────────────────
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+
+      # ── MCP (LLM Integration) ─────────────────────────────────────────────────
+      MCP_ENABLED: ${MCP_ENABLED:-true}
+      # IMPORTANT: Change MCP_API_KEY before deploying to production!
+      MCP_API_KEY: ${MCP_API_KEY:-change-this-mcp-key}
+
+      # ── CORS ──────────────────────────────────────────────────────────────────
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3001}
+
+      # ── Property / Hub Identity ───────────────────────────────────────────────
+      PROPERTY_ID: ${PROPERTY_ID:-default-property}
+      HUB_NAME: ${HUB_NAME:-Zapp Hub}
+
+    healthcheck:
+      # Use 127.0.0.1 explicitly — Alpine's wget treats "localhost" as ::1
+      # (IPv6) but Node.js binds to 0.0.0.0 (IPv4), causing connection refused.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+# =============================================================================
+# Development override — create docker-compose.override.yml to enable:
+#
+#   services:
+#     hub:
+#       build:
+#         target: deps          # use deps stage which has pnpm + devDeps
+#       command: ["pnpm", "dev"]
+#       volumes:
+#         - ./src:/app/src:ro   # hot-reload source files
+#       environment:
+#         NODE_ENV: development
+#         LOG_LEVEL: debug
+#
+# Then run:  docker compose up
+# Logs:      docker compose logs -f hub
+# Rebuild:   docker compose build hub && docker compose up -d hub
+# =============================================================================
