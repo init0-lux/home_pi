@@ -2,7 +2,7 @@
 
 import { useMutation } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 import { useRoomsData } from "@/hooks/use-rooms-data";
 import { provisionDevice } from "@/lib/api";
@@ -23,6 +23,10 @@ export function ProvisionScreen() {
     type: "light" as DeviceType,
   });
 
+  const effectiveRoomId = rooms.length > 0 && !rooms.some(r => r.roomId === form.roomId)
+    ? rooms[0].roomId
+    : form.roomId;
+
   const mutation = useMutation({
     mutationFn: provisionDevice,
     onSuccess: (result) => {
@@ -32,77 +36,81 @@ export function ProvisionScreen() {
 
   return (
     <AppShell
-      eyebrow="Provisioning Flow"
+      eyebrow="Step 2 of 3"
       isOnline={isOnline}
-      subtitle="Manual ESP onboarding flow for AP-mode configuration, Wi-Fi credentials, and room assignment."
-      title="Add Device"
+      subtitle="Bridge your device to your network with your credentials."
+      title="Sync Hardware"
       usingCache={usingCache}
     >
-      <section className="grid gap-4 lg:grid-cols-[0.8fr,1.2fr]">
-        <div className="rounded-[32px] border border-white/10 bg-slate-950/35 p-6">
-          <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Manual Step</p>
-          <h2 className="mt-3 text-2xl font-semibold text-white">Connect to the ESP access point</h2>
-          <ol className="mt-5 space-y-4 text-sm leading-7 text-slate-300">
-            <li>1. Power the module and wait for the device AP to appear on your phone.</li>
-            <li>2. Join the ESP Wi-Fi manually. Browsers cannot switch networks for you.</li>
-            <li>3. Return here, enter local Wi-Fi credentials, and assign the room.</li>
-          </ol>
-          <div className="mt-6 rounded-3xl border border-dashed border-white/15 bg-white/5 p-4 text-sm text-slate-300">
-            Suggested AP name: <span className="font-semibold text-white">Zapp-Setup-XXXX</span>
-          </div>
-        </div>
-
-        <form
-          className="rounded-[32px] border border-white/10 bg-white/6 p-6 shadow-[0_20px_80px_rgba(8,15,28,0.28)]"
-          onSubmit={async (event) => {
-            event.preventDefault();
-            await mutation.mutateAsync(form);
-          }}
-        >
-          <div className="grid gap-4 md:grid-cols-2">
-            <label className="space-y-2 text-sm text-slate-200">
-              <span className="font-medium">Wi-Fi SSID</span>
+      <form
+        className="flex flex-col gap-6"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          await mutation.mutateAsync({ ...form, roomId: effectiveRoomId });
+        }}
+      >
+        <section className="bg-[rgba(32,31,31,0.4)] backdrop-blur-3xl rounded-lg border border-outline-variant/10 p-5">
+          <label className="block text-[10px] uppercase tracking-widest font-bold text-primary-container mb-4">Network Connection</label>
+          <div className="flex flex-col gap-3">
+            <div className="relative">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0"/>
+              </svg>
               <input
-                className="w-full rounded-2xl border border-white/10 bg-slate-950/45 px-4 py-3 text-white outline-none transition focus:border-white/25"
+                className="w-full bg-surface-container-lowest border-none rounded-xl py-3 pl-10 pr-4 text-xs text-on-surface focus:ring-1 focus:ring-primary-container transition-all outline-none"
                 onChange={(event) =>
                   setForm((current) => ({ ...current, ssid: event.target.value }))
                 }
-                placeholder="Property Wi-Fi"
+                placeholder="WiFi Network Name"
                 value={form.ssid}
+                required
               />
-            </label>
-            <label className="space-y-2 text-sm text-slate-200">
-              <span className="font-medium">Wi-Fi Password</span>
+            </div>
+            <div className="relative">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+              </svg>
               <input
-                className="w-full rounded-2xl border border-white/10 bg-slate-950/45 px-4 py-3 text-white outline-none transition focus:border-white/25"
+                className="w-full bg-surface-container-lowest border-none rounded-xl py-3 pl-10 pr-10 text-xs text-on-surface focus:ring-1 focus:ring-primary-container transition-all outline-none"
                 onChange={(event) =>
                   setForm((current) => ({ ...current, password: event.target.value }))
                 }
-                placeholder="••••••••"
+                placeholder="WiFi Password"
                 type="password"
                 value={form.password}
+                required
               />
-            </label>
-            <label className="space-y-2 text-sm text-slate-200">
-              <span className="font-medium">Room</span>
-              <select
-                className="w-full rounded-2xl border border-white/10 bg-slate-950/45 px-4 py-3 text-white outline-none transition focus:border-white/25"
-                onChange={(event) =>
-                  setForm((current) => ({ ...current, roomId: event.target.value }))
-                }
-                value={form.roomId}
-              >
-                {rooms.map((room) => (
-                  <option key={room.roomId} value={room.roomId}>
-                    {room.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="space-y-2 text-sm text-slate-200">
-              <span className="font-medium">Device Type</span>
-              <select
-                className="w-full rounded-2xl border border-white/10 bg-slate-950/45 px-4 py-3 text-white outline-none transition focus:border-white/25"
+            </div>
+          </div>
+        </section>
+
+        <section className="space-y-3">
+          <div className="flex items-end justify-between px-1">
+            <label className="text-[10px] uppercase tracking-widest font-bold text-on-surface-variant">Room Assignment</label>
+          </div>
+           <div className="grid grid-cols-2 gap-3">
+             {rooms.map((room) => (
+                <button
+                  key={room.roomId}
+                  type="button"
+                  onClick={() => setForm((curr) => ({ ...curr, roomId: room.roomId }))}
+                  className={`flex flex-col items-start gap-2 p-4 rounded-lg transition-all active:scale-95 ${
+                    effectiveRoomId === room.roomId 
+                      ? "bg-primary-container/10 border border-primary-container/30 text-primary-container"
+                      : "bg-surface-container-low border border-transparent text-on-surface-variant hover:bg-surface-variant"
+                  }`}
+                >
+                  <span className="text-xs font-bold truncate w-full text-left">{room.name}</span>
+                </button>
+             ))}
+           </div>
+        </section>
+
+        <section className="bg-[rgba(32,31,31,0.4)] backdrop-blur-3xl rounded-lg border border-outline-variant/10 p-5 mt-2">
+          <label className="block text-[10px] uppercase tracking-widest font-bold text-secondary-container mb-4">Device Config</label>
+          <div className="flex flex-col gap-3">
+            <select
+                className="w-full bg-surface-container-lowest border-none rounded-xl py-3 px-4 text-xs text-on-surface focus:ring-1 focus:ring-secondary-container transition-all outline-none appearance-none"
                 onChange={(event) =>
                   setForm((current) => ({
                     ...current,
@@ -112,44 +120,44 @@ export function ProvisionScreen() {
                 value={form.type}
               >
                 {deviceTypes.map((type) => (
-                  <option key={type} value={type}>
+                  <option key={type} value={type} className="bg-surface">
                     {type.toUpperCase()}
                   </option>
                 ))}
-              </select>
-            </label>
-          </div>
-
-          <label className="mt-4 block space-y-2 text-sm text-slate-200">
-            <span className="font-medium">Friendly Name</span>
+            </select>
             <input
-              className="w-full rounded-2xl border border-white/10 bg-slate-950/45 px-4 py-3 text-white outline-none transition focus:border-white/25"
+              className="w-full bg-surface-container-lowest border-none rounded-xl py-3 px-4 text-xs text-on-surface focus:ring-1 focus:ring-secondary-container transition-all outline-none"
               onChange={(event) =>
                 setForm((current) => ({ ...current, name: event.target.value }))
               }
-              placeholder="Bedside Light"
+              placeholder="Friendly Name (e.g. Bedside Light)"
               value={form.name}
+              required
             />
-          </label>
-
-          {mutation.error ? (
-            <p className="mt-4 text-sm text-rose-200">{mutation.error.message}</p>
-          ) : null}
-
-          <div className="mt-6 flex flex-wrap items-center gap-3">
-            <button
-              className="rounded-full bg-white px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-slate-100 disabled:opacity-60"
-              disabled={!form.ssid || !form.password || mutation.isPending || !isOnline}
-              type="submit"
-            >
-              {mutation.isPending ? "Sending config..." : "Send Config"}
-            </button>
-            <p className="text-sm text-slate-300">
-              Device will reboot, auto-register, and redirect into the assigned room.
-            </p>
           </div>
-        </form>
-      </section>
+        </section>
+
+        {mutation.error ? (
+          <p className="mt-2 text-sm text-error">{mutation.error.message}</p>
+        ) : null}
+
+        <div className="flex items-start gap-3 p-4 rounded-xl bg-surface-container-low border border-outline-variant/10 mt-2">
+           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" className="w-5 h-5 text-primary-container shrink-0">
+             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+           </svg>
+           <p className="text-[11px] leading-relaxed text-on-surface-variant">
+               Connecting sends config to local ESP. Device will reboot and register.
+           </p>
+        </div>
+
+        <button
+          className="w-full py-4 mt-2 rounded-2xl bg-gradient-to-r from-primary-container to-[#E6C200] text-on-primary-container font-headline font-bold text-lg tracking-wide shadow-[0_12px_24px_rgba(255,215,0,0.2)] active:scale-95 transition-all duration-200 uppercase disabled:opacity-50 disabled:cursor-not-allowed"
+          disabled={!form.ssid || !form.password || mutation.isPending || !isOnline}
+          type="submit"
+        >
+          {mutation.isPending ? "Sending..." : "Continue"}
+        </button>
+      </form>
     </AppShell>
   );
 }

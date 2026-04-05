@@ -1,19 +1,17 @@
 "use client";
 
 import type { ReactNode } from "react";
-
 import { useDashboardStore } from "@/lib/store/dashboard-store";
-
 import { InstallButton } from "./install-button";
 import { Navigation } from "./navigation";
 import { OfflineBanner } from "./offline-banner";
 
 type AppShellProps = {
   children: ReactNode;
-  eyebrow: string;
+  eyebrow?: string;
   isOnline: boolean;
-  subtitle: string;
-  title: string;
+  subtitle?: string;
+  title?: string;
   usingCache?: boolean;
 };
 
@@ -22,63 +20,48 @@ export function AppShell({
   eyebrow,
   isOnline,
   subtitle,
-  title,
+  title = "Zapp",
   usingCache = false,
 }: AppShellProps) {
   const lastSyncAt = useDashboardStore((store) => store.lastSyncAt);
 
   return (
-    <div className="relative flex min-h-screen flex-col overflow-hidden px-4 pb-6 pt-4 md:px-8 md:pb-8 md:pt-8">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(247,201,132,0.24),transparent_30%),radial-gradient(circle_at_top_right,rgba(122,197,255,0.18),transparent_34%),linear-gradient(180deg,#08111f_0%,#0b1324_38%,#111a2c_100%)]" />
-      <div className="pointer-events-none absolute inset-x-0 top-0 h-72 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.12),transparent_50%)]" />
-
-      <header className="relative mx-auto w-full max-w-6xl">
-        <div className="rounded-[36px] border border-white/10 bg-white/6 p-5 shadow-[0_24px_90px_rgba(8,15,28,0.35)] backdrop-blur-xl md:p-8">
-          <div className="flex flex-col gap-6 md:flex-row md:items-start md:justify-between">
-            <div className="max-w-2xl">
-              <p className="text-xs uppercase tracking-[0.3em] text-slate-300">{eyebrow}</p>
-              <h1 className="mt-3 text-4xl font-semibold tracking-tight text-white md:text-5xl">
-                {title}
-              </h1>
-              <p className="mt-4 max-w-xl text-sm leading-7 text-slate-300 md:text-base">
-                {subtitle}
-              </p>
-            </div>
-
-            <div className="flex flex-col items-start gap-3 md:items-end">
-              <div className="flex items-center gap-2 rounded-full border border-white/10 bg-slate-950/40 px-4 py-2 text-sm text-slate-100">
-                <span
-                  className={`h-2.5 w-2.5 rounded-full ${
-                    isOnline ? "bg-emerald-300" : "bg-amber-300"
-                  }`}
-                />
-                <span>{isOnline ? "Hub reachable" : "Offline cache mode"}</span>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-3">
-                <InstallButton />
-                <div className="rounded-full border border-white/10 px-3 py-2 text-xs text-slate-300">
-                  Polling every 2.5s
-                </div>
-              </div>
-            </div>
+    <div className="mx-auto flex flex-col relative h-[100dvh] w-full max-w-md bg-surface overflow-hidden shadow-2xl">
+      <header className="flex-none flex justify-between items-center px-6 py-4 bg-surface/80 backdrop-blur-xl z-50">
+        <div className="flex items-center gap-3">
+          <div className="p-2 rounded-full cursor-pointer bg-surface-container-highest active:scale-90 transition-all duration-200">
+            <svg viewBox="0 0 24 24" fill="none" className="w-5 h-5 text-neutral-100">
+              <path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+            </svg>
           </div>
-
-          {!isOnline ? (
-            <div className="mt-6">
-              <OfflineBanner lastSyncAt={lastSyncAt} usingCache={usingCache} />
-            </div>
-          ) : null}
+          <h1 className="text-xl font-bold tracking-tighter text-neutral-100 font-headline">{title} ⚡</h1>
+        </div>
+        <div className="flex items-center justify-end gap-x-2">
+          {!isOnline && <span className="w-2.5 h-2.5 rounded-full bg-error" />}
+          <div className="flex items-center justify-center w-9 h-9 rounded-full bg-surface-container-highest text-primary-container hover:opacity-80 transition-opacity active:scale-95">
+             <InstallButton />
+          </div>
         </div>
       </header>
 
-      <main className="relative mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 py-6 md:py-8">
+      <main className="flex-1 flex flex-col px-6 overflow-y-auto pb-28">
+        {(eyebrow || subtitle) && (
+          <section className="mt-2 mb-4 flex-none">
+            {subtitle && <p className="text-[10px] uppercase tracking-[0.3em] font-label font-semibold text-neutral-500 mb-1">{subtitle}</p>}
+            {eyebrow && <h2 className="text-3xl font-headline font-extralight tracking-tight text-primary-container">{eyebrow}</h2>}
+          </section>
+        )}
+
+        {!isOnline ? (
+          <div className="mb-4">
+            <OfflineBanner lastSyncAt={lastSyncAt} usingCache={usingCache} />
+          </div>
+        ) : null}
+
         {children}
       </main>
 
-      <div className="relative mx-auto w-full max-w-6xl">
-        <Navigation />
-      </div>
+      <Navigation />
     </div>
   );
 }

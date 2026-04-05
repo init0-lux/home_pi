@@ -1,18 +1,27 @@
 @import "tailwindcss";
 
 :root {
-  --background: #08111f;
-  --foreground: #f8fafc;
-  --font-sans:
-    "Avenir Next", "Segoe UI", "Trebuchet MS", "Helvetica Neue", sans-serif;
-  --font-mono: "SFMono-Regular", "SF Mono", "IBM Plex Mono", monospace;
+  --background: #131313;
+  --foreground: #e5e2e1;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-sans);
-  --font-mono: var(--font-mono);
+  --font-sans: var(--font-inter);
+  --font-display: var(--font-manrope);
+  
+  --color-primary-container: #ffd700;
+  --color-on-primary-container: #705e00;
+  --color-secondary-container: #3694ec;
+  --color-tertiary-container: #72ebff;
+
+  --color-surface: #131313;
+  --color-surface-container-low: #1c1b1b;
+  --color-surface-container-highest: #353534;
+  --color-surface-bright: #393939;
+
+  --color-outline-variant: #4d4732;
 }
 
 * {
@@ -39,14 +48,18 @@ textarea {
 }
 
 ::selection {
-  background: rgba(247, 201, 132, 0.3);
+  background: rgba(255, 215, 0, 0.3);
 }
 
-@layer base {
-  body {
-    background-image:
-      radial-gradient(circle at 10% 10%, rgba(247, 201, 132, 0.16), transparent 28%),
-      radial-gradient(circle at 88% 8%, rgba(122, 197, 255, 0.14), transparent 24%),
-      linear-gradient(180deg, #08111f 0%, #0d1627 40%, #111a2d 100%);
-  }
+@utility glass-card {
+  background: rgba(53, 53, 52, 0.6);
+  backdrop-filter: blur(24px);
+}
+
+@utility hardware-gradient {
+  background: linear-gradient(15deg, rgba(255, 215, 0, 0.1) 0%, rgba(255, 215, 0, 0) 100%);
+}
+
+@utility active-nav-glow {
+  box-shadow: 0 0 20px rgba(255, 215, 0, 0.15);
 }
