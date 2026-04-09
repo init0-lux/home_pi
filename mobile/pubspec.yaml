@@ -1,0 +1,38 @@
+name: zapp
+description: "A feature-rich native mobile application for controlling the Zapp smart switch ecosystem."
+publish_to: "none"
+
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.1.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^2.4.9
+  dio: ^5.4.0
+  mqtt_client: ^10.0.0
+  go_router: ^13.0.1
+  freezed_annotation: ^2.4.1
+  json_annotation: ^4.8.1
+  nsd: ^2.0.0
+  wifi_iot: ^0.3.18
+  isar: ^3.1.0
+  isar_flutter_libs: ^3.1.0
+  flutter_secure_storage: ^9.0.0
+  google_sign_in: ^6.1.6
+  firebase_messaging: ^14.7.9
+  firebase_core: ^2.24.2
+  connectivity_plus: ^5.0.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+  build_runner: ^2.4.7
+  freezed: ^2.4.1
+  json_serializable: ^8.0.0
+
+flutter:
+  uses-material-design: true
